@@ -670,11 +670,16 @@ def eval(
     amp_custom_black_list=[],
     amp_custom_white_list=[],
     amp_dtype="float16",
+    enable_profiling=False,
 ):
     model.eval()
     with paddle.no_grad():
         total_frame = 0.0
         total_time = 0.0
+        total_inference_time = 0.0
+        total_postprocess_time = 0.0
+        total_metric_time = 0.0
+        
         pbar = tqdm(
             total=len(valid_dataloader), desc="eval model:", position=0, leave=True
         )
@@ -688,7 +693,18 @@ def eval(
             if idx >= max_iter:
                 break
             images = batch[0]
-            start = time.time()
+
+            # print(f"✅ Input images device: {images.place}")
+            # # Output: Place(gpu:0)  or  Place(cpu)
+            
+            # # ✅ ADD DEBUG PRINT 2: Check model device
+            # for name, param in model.named_parameters():
+            #     print(f"✅ Model param '{name}' device: {param.place}")
+            #     break  # Just first param to avoid spam
+            
+            # ========== INFERENCE TIMING ==========
+            start_total = time.time()
+            start_infer = time.time()
 
             # use amp
             if scaler:
@@ -727,41 +743,87 @@ def eval(
                     lr_img = preds["lr_img"]
                 else:
                     preds = model(images)
-
+            
+            # if isinstance(preds, dict):
+            #     for k, v in preds.items():
+            #         if isinstance(v, paddle.Tensor):
+            #             print(f"✅ Output preds['{k}'] device: {v.place}")
+            #             print(f"   Shape: {v.shape}, dtype: {v.dtype}")
+                        
+            infer_time = time.time() - start_infer
+            total_inference_time += infer_time
+            
+            # ========== POST-PROCESSING TIMING ==========
+            start_postprocess = time.time()
             batch_numpy = []
             for item in batch:
                 if isinstance(item, paddle.Tensor):
                     batch_numpy.append(item.numpy())
                 else:
                     batch_numpy.append(item)
-            # Obtain usable results from post-processing methods
-            total_time += time.time() - start
+            
             # Evaluate the results of the current batch
+            if model_type in ["table", "kie"]:
+                if post_process_class is None:
+                    pass
+                else:
+                    post_result = post_process_class(preds, batch_numpy)
+            elif model_type in ["sr"]:
+                pass
+            elif model_type in ["can"]:
+                pass
+            elif model_type in ["latexocr", "unimernet", "pp_formulanet"]:
+                post_result = post_process_class(preds, batch[1], "eval")
+            else:
+                post_result = post_process_class(preds, batch_numpy[1])
+            
+            postprocess_time = time.time() - start_postprocess
+            total_postprocess_time += postprocess_time
+            
+            # ========== METRICS TIMING ==========
+            start_metric = time.time()
             if model_type in ["table", "kie"]:
                 if post_process_class is None:
                     eval_class(preds, batch_numpy)
                 else:
-                    post_result = post_process_class(preds, batch_numpy)
                     eval_class(post_result, batch_numpy)
             elif model_type in ["sr"]:
                 eval_class(preds, batch_numpy)
             elif model_type in ["can"]:
                 eval_class(preds[0], batch_numpy[2:], epoch_reset=(idx == 0))
             elif model_type in ["latexocr", "unimernet", "pp_formulanet"]:
-                post_result = post_process_class(preds, batch[1], "eval")
                 eval_class(post_result[0], post_result[1], epoch_reset=(idx == 0))
             else:
-                post_result = post_process_class(preds, batch_numpy[1])
                 eval_class(post_result, batch_numpy)
+            
+            metric_time = time.time() - start_metric
+            total_metric_time += metric_time
+            
+            total_time += time.time() - start_total
 
             pbar.update(1)
             total_frame += len(images)
             sum_images += 1
+        
         # Get final metric，eg. acc or hmean
         metric = eval_class.get_metric()
 
     pbar.close()
     model.train()
+    
+    # ========== PROFILING REPORT ==========
+    if enable_profiling and total_time > 0:
+        print("\n" + "="*60)
+        print("⏱️  EVALUATION PROFILING REPORT")
+        print("="*60)
+        print(f"Total Evaluation Time: {total_time:.2f}s")
+        print(f"  📊 Inference:      {total_inference_time:.2f}s ({100*total_inference_time/total_time:.1f}%)")
+        print(f"  🔄 Post-process:   {total_postprocess_time:.2f}s ({100*total_postprocess_time/total_time:.1f}%)")
+        print(f"  📈 Metrics:        {total_metric_time:.2f}s ({100*total_metric_time/total_time:.1f}%)")
+        print(f"\nProcessed {sum_images} images")
+        print(f"Average time per image: {total_time/sum_images:.3f}s")
+        print("="*60 + "\n")
+    
     # Avoid ZeroDivisionError
     if total_time > 0:
         metric["fps"] = total_frame / total_time
@@ -926,6 +988,7 @@ def preprocess(is_train=False):
     )
 
     device = paddle.set_device(device)
+
 
     config["Global"]["distributed"] = dist.get_world_size() != 1
 

@@ -20,10 +20,30 @@ __all__ = ["DetMetric", "DetFCEMetric"]
 
 from .eval_det_iou import DetectionIoUEvaluator
 
+try:
+    from .eval_det_iou_pyclipper import DetectionIoUEvaluatorPyClipper
+    HAS_PYCLIPPER = True
+except ImportError:
+    HAS_PYCLIPPER = False
+    
+# Try to import GPU-optimized version, fallback to CPU if not available
+try:
+    from .eval_det_iou_gpu import DetectionIoUEvaluatorGPU
+    HAS_GPU_EVALUATOR = False
+except ImportError:
+    HAS_GPU_EVALUATOR = False
+
 
 class DetMetric(object):
-    def __init__(self, main_indicator="hmean", **kwargs):
-        self.evaluator = DetectionIoUEvaluator()
+    def __init__(self, main_indicator="hmean", use_gpu_eval=True, **kwargs):
+        # Use GPU-optimized evaluator if available and requested
+        if HAS_PYCLIPPER:
+            self.evaluator = DetectionIoUEvaluatorPyClipper()
+        elif HAS_GPU_EVALUATOR and use_gpu_eval:
+            self.evaluator = DetectionIoUEvaluatorGPU()
+        else:
+            self.evaluator = DetectionIoUEvaluator()
+        self.main_indicator = main_indicator
         self.main_indicator = main_indicator
         self.reset()
 
@@ -72,8 +92,12 @@ class DetMetric(object):
 
 
 class DetFCEMetric(object):
-    def __init__(self, main_indicator="hmean", **kwargs):
-        self.evaluator = DetectionIoUEvaluator()
+    def __init__(self, main_indicator="hmean", use_gpu_eval=True, **kwargs):
+        # Use GPU-optimized evaluator if available and requested
+        if HAS_GPU_EVALUATOR and use_gpu_eval:
+            self.evaluator = DetectionIoUEvaluatorGPU()
+        else:
+            self.evaluator = DetectionIoUEvaluator()
         self.main_indicator = main_indicator
         self.reset()
 
